@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -107,6 +108,9 @@ func (c *Cache) installEntry(ctx context.Context, entry v1.LockedModule, acquire
 		// rather than racing a second rename into the same cache directory.
 		info, err = os.Lstat(installed)
 		if errors.Is(err, os.ErrNotExist) {
+			if c.logger != nil {
+				c.logger.Info(ctx, "downloading module", slog.String("source", entry.Source), slog.String("version", entry.Version))
+			}
 			if err := fetchPinnedV1Module(ctx, entry, c.root, installed, c.proxy); err != nil {
 				return err
 			}
