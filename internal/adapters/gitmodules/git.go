@@ -22,6 +22,7 @@ func gitV1(ctx context.Context, dir string, args ...string) (string, error) {
 func repositoryNotFound(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "repository not found") ||
+		strings.Contains(message, "is not a valid repository name") ||
 		(strings.Contains(message, "fatal: repository '") && strings.Contains(message, "' not found"))
 }
 
