@@ -95,21 +95,22 @@ type v1GenerationModule struct {
 }
 
 func generateSelectedV1Module(ctx context.Context, log logger.Logger, cache modules.Cache, request Request, configPath, repoRoot string, selection v1ModuleSelection, gen v1.Generate) error {
-	selected, err := resolveV1GenerationModule(ctx, cache, repoRoot, filepath.Dir(configPath), selection, request.Frozen)
+	selected, err := resolveV1GenerationModule(ctx, cache, newV1LocalModules(repoRoot), filepath.Dir(configPath), selection, request.Frozen)
 	if err != nil {
 		return fmt.Errorf("resolveV1GenerationModule: %w", err)
 	}
 	return generateV1ModuleWithRoots(ctx, log, request, configPath, selected.directory, gen, selected.module, selected.dependencies)
 }
 
-func resolveV1GenerationModule(ctx context.Context, cache modules.Cache, repoRoot, configDir string, selection v1ModuleSelection, frozen bool) (v1GenerationModule, error) {
+func resolveV1GenerationModule(ctx context.Context, cache modules.Cache, locals *v1LocalModules, configDir string, selection v1ModuleSelection, frozen bool) (v1GenerationModule, error) {
+	repoRoot := locals.repoRoot
 	if frozen {
-		return resolveFrozenGenerationModule(ctx, cache, repoRoot, configDir, selection)
+		return resolveFrozenGenerationModule(ctx, cache, locals, configDir, selection)
 	}
 	if selection.directory != "" {
 		return readV1GenerationModule(ctx, cache, selection.directory)
 	}
-	localDir, err := findV1LocalModuleByName(repoRoot, selection.source)
+	localDir, err := locals.find(selection.source)
 	if err != nil {
 		return v1GenerationModule{}, fmt.Errorf("findV1LocalModuleByName: %w", err)
 	}
@@ -201,7 +202,40 @@ func readV1GenerationModule(ctx context.Context, cache modules.Cache, directory 
 }
 
 func findV1LocalModuleByName(repoRoot, name string) (string, error) {
-	var found string
+	return newV1LocalModules(repoRoot).find(name)
+}
+
+// v1LocalModules indexes the workspace's module declarations on first use, so
+// resolving many generation targets walks the workspace once.
+type v1LocalModules struct {
+	repoRoot   string
+	indexed    bool
+	err        error
+	dirs       map[string]string
+	duplicates map[string]error
+}
+
+func newV1LocalModules(repoRoot string) *v1LocalModules {
+	return &v1LocalModules{repoRoot: repoRoot}
+}
+
+func (locals *v1LocalModules) find(name string) (string, error) {
+	if !locals.indexed {
+		locals.dirs, locals.duplicates, locals.err = indexV1LocalModules(locals.repoRoot)
+		locals.indexed = true
+	}
+	if locals.err != nil {
+		return "", locals.err
+	}
+	if err := locals.duplicates[name]; err != nil {
+		return "", err
+	}
+	return locals.dirs[name], nil
+}
+
+func indexV1LocalModules(repoRoot string) (map[string]string, map[string]error, error) {
+	dirs := make(map[string]string)
+	duplicates := make(map[string]error)
 	err := workspace.Walk(repoRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// Module lookup reads declarations; source aliases are validated after selection.
@@ -230,13 +264,13 @@ func findV1LocalModuleByName(repoRoot, name string) (string, error) {
 		if parseErr != nil {
 			return fmt.Errorf("%s: %w", path, parseErr)
 		}
-		if module.Name == name {
-			if found != "" {
-				return fmt.Errorf("module identity %q is declared in both %s and %s", name, found, filepath.Dir(path))
-			}
-			found = filepath.Dir(path)
+		found, declared := dirs[module.Name]
+		if !declared {
+			dirs[module.Name] = filepath.Dir(path)
+		} else if duplicates[module.Name] == nil {
+			duplicates[module.Name] = fmt.Errorf("module identity %q is declared in both %s and %s", module.Name, found, filepath.Dir(path))
 		}
 		return nil
 	})
-	return found, err
+	return dirs, duplicates, err
 }

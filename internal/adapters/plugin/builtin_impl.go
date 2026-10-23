@@ -40,6 +40,11 @@ func getWasmModule(pluginName string) ([]byte, []string, error) {
 	return protocGenUniversal, args, nil
 }
 
+// wasmCompilationCache keeps compiled builtin modules for the process lifetime,
+// so each generation target instantiates them without recompiling. Closing a
+// compiled module evicts it from the cache.
+var wasmCompilationCache = wazero.NewCompilationCache()
+
 // BuiltinPluginExecutor executes builtin plugins via WASM
 type BuiltinPluginExecutor struct {
 	logger logger.Logger
@@ -104,7 +109,7 @@ func (e *BuiltinPluginExecutor) runWasmPlugin(ctx context.Context, pluginName st
 	ctx = experimental.WithMemoryAllocator(ctx, allocator.NewNonMoving())
 
 	// Create wazero runtime
-	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV2|experimental.CoreFeaturesThreads))
+	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV2|experimental.CoreFeaturesThreads).WithCompilationCache(wasmCompilationCache))
 
 	// A failed runtime close must not turn into successful generated output.
 	defer func() {
@@ -119,7 +124,11 @@ func (e *BuiltinPluginExecutor) runWasmPlugin(ctx context.Context, pluginName st
 
 	// Instantiate memory module
 	if len(wasmMemory) > 0 {
-		if _, err = rt.InstantiateWithConfig(ctx, wasmMemory, wazero.NewModuleConfig().WithName("env")); err != nil {
+		memory, err := rt.CompileModule(ctx, wasmMemory)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compile memory module: %w", err)
+		}
+		if _, err = rt.InstantiateModule(ctx, memory, wazero.NewModuleConfig().WithName("env")); err != nil {
 			return nil, fmt.Errorf("failed to instantiate memory module: %w", err)
 		}
 	}
@@ -144,8 +153,15 @@ func (e *BuiltinPluginExecutor) runWasmPlugin(ctx context.Context, pluginName st
 		WithRandSource(rand.Reader).
 		WithArgs(args...)
 
+	// Compiled modules stay in wasmCompilationCache until closed, so they are
+	// instantiated directly instead of through InstantiateWithConfig.
+	compiled, err := rt.CompileModule(ctx, wasmBin)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compile wasm module: %w", err)
+	}
+
 	// Instantiate WASM module
-	_, err = rt.InstantiateWithConfig(ctx, wasmBin, cfg)
+	_, err = rt.InstantiateModule(ctx, compiled, cfg)
 	if err != nil {
 		if sErr, ok := err.(*sys.ExitError); ok { //nolint:errorlint
 			return nil, fmt.Errorf("wasm plugin exited with code %d", sErr.ExitCode())

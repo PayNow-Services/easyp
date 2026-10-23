@@ -11,7 +11,7 @@ import (
 )
 
 func generateV1ModuleWithRoots(ctx context.Context, log logger.Logger, request Request, configPath, moduleDir string, gen v1.Generate, module v1.Module, importRoots modules.SourceRoots) error {
-	app, err := prepareV1ModuleCore(log, request, configPath, moduleDir, gen, module, importRoots)
+	app, _, err := prepareV1ModuleCore(log, request, configPath, moduleDir, gen, module, importRoots)
 	if err != nil {
 		return fmt.Errorf("prepareV1ModuleCore: %w", err)
 	}
@@ -21,31 +21,37 @@ func generateV1ModuleWithRoots(ctx context.Context, log logger.Logger, request R
 	return nil
 }
 
-func prepareV1ModuleCore(log logger.Logger, request Request, configPath, moduleDir string, gen v1.Generate, module v1.Module, importRoots modules.SourceRoots) (*core.Core, error) {
+// prepareV1ModuleCore also returns the index of the module's sources and
+// import roots, so callers can derive ownership without walking them again.
+func prepareV1ModuleCore(log logger.Logger, request Request, configPath, moduleDir string, gen v1.Generate, module v1.Module, importRoots modules.SourceRoots) (*core.Core, *modules.SourceIndex, error) {
 	sources, err := modules.ModuleSources(moduleDir, module)
 	if err != nil {
-		return nil, fmt.Errorf("ModuleSources: %w", err)
+		return nil, nil, fmt.Errorf("ModuleSources: %w", err)
 	}
 	allSources := append(append(modules.SourceRoots(nil), sources...), importRoots...)
-	if err := modules.CheckSourceCollisions(allSources); err != nil {
-		return nil, fmt.Errorf("CheckSourceCollisions: %w", err)
+	index, err := modules.IndexSources(allSources)
+	if err != nil {
+		return nil, nil, fmt.Errorf("IndexSources: %w", err)
+	}
+	if err := index.CheckCollisions(); err != nil {
+		return nil, nil, fmt.Errorf("CheckSourceCollisions: %w", err)
 	}
 	options, err := prepareV1GeneratorConfig(configPath, moduleDir, gen, module)
 	if err != nil {
-		return nil, fmt.Errorf("prepareV1GeneratorConfig: %w", err)
+		return nil, nil, fmt.Errorf("prepareV1GeneratorConfig: %w", err)
 	}
 	options.Logger = log
 	options.PluginWorkDir = request.WorkDir
 	options.ImportRoots = importRoots.Paths()
 	options.ImportFileAllowed = allSources.FileAllowed()
-	options.OpenSourceFile = allSources.OpenSourceFile
+	options.OpenSourceFile = allSources.SourceFileOpener()
 	if options.ManagedModeConfig.Enabled || options.ManagedModeConfig.GoPackageOnly {
 		roots := append(modules.SourceRoots(nil), importRoots...)
 		roots = append(roots, sources...)
-		options.FileModules, err = roots.FileModules()
+		options.FileModules, err = index.FileModules(roots)
 		if err != nil {
-			return nil, fmt.Errorf("FileModules: %w", err)
+			return nil, nil, fmt.Errorf("FileModules: %w", err)
 		}
 	}
-	return core.New(options), nil
+	return core.New(options), index, nil
 }

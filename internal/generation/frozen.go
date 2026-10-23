@@ -21,11 +21,11 @@ func readFrozenGenerationModule(ctx context.Context, cache modules.Cache, direct
 	return v1GenerationModule{directory: directory, resolutionDir: directory, module: module, dependencies: dependencies}, nil
 }
 
-func resolveFrozenGenerationModule(ctx context.Context, cache modules.Cache, repoRoot, configDir string, selection v1ModuleSelection) (v1GenerationModule, error) {
+func resolveFrozenGenerationModule(ctx context.Context, cache modules.Cache, locals *v1LocalModules, configDir string, selection v1ModuleSelection) (v1GenerationModule, error) {
 	if selection.directory != "" {
 		return readFrozenGenerationModule(ctx, cache, selection.directory)
 	}
-	consumerDir, err := generatorV1ModuleDir(repoRoot, configDir)
+	consumerDir, err := generatorV1ModuleDir(locals.repoRoot, configDir)
 	if err != nil {
 		return v1GenerationModule{}, fmt.Errorf("generatorV1ModuleDir: %w", err)
 	}
@@ -58,7 +58,7 @@ func resolveFrozenGenerationModule(ctx context.Context, cache modules.Cache, rep
 		}
 		return v1GenerationModule{directory: directory, resolutionDir: consumerDir, module: module, dependencies: others}, nil
 	}
-	localDir, err := findV1LocalModuleByName(repoRoot, selection.source)
+	localDir, err := locals.find(selection.source)
 	if err != nil {
 		return v1GenerationModule{}, fmt.Errorf("findV1LocalModuleByName: %w", err)
 	}

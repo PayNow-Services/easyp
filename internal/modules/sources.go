@@ -60,6 +60,8 @@ func (root SourceRoot) walk(selected func(string) bool, namesOnly bool, targetAl
 	if err != nil {
 		return fmt.Errorf("ResolveLocal: %w", err)
 	}
+	physicalBoundary := physicalSourcePath(boundary)
+	physicalRootPath := filepath.Join(physicalBoundary, filepath.FromSlash(physicalRoot.Path))
 	return sourceview.WalkLocal(context.Background(), boundary, relative, func(logical string, resolved sourceview.Resolution, walkErr error) error {
 		path := filepath.Join(boundary, filepath.FromSlash(logical))
 		if filepath.Ext(path) == ".proto" && root.fileAllowed != nil && !root.fileAllowed(path) {
@@ -80,7 +82,7 @@ func (root SourceRoot) walk(selected func(string) bool, namesOnly bool, targetAl
 		if filepath.Ext(path) == ".proto" && selected != nil && !selected(path) {
 			return nil
 		}
-		if errors.Is(walkErr, sourceview.ErrNestedRepository) && targetAllowed != nil && targetAllowed(filepath.Join(physicalSourcePath(boundary), filepath.FromSlash(resolved.Path))) {
+		if errors.Is(walkErr, sourceview.ErrNestedRepository) && targetAllowed != nil && targetAllowed(filepath.Join(physicalBoundary, filepath.FromSlash(resolved.Path))) {
 			walkErr = nil
 		}
 		if walkErr != nil && namesOnly && filepath.Ext(path) == ".proto" {
@@ -92,12 +94,12 @@ func (root SourceRoot) walk(selected func(string) bool, namesOnly bool, targetAl
 			}
 			return walkErr
 		}
-		physical := filepath.Join(physicalSourcePath(boundary), filepath.FromSlash(resolved.Path))
+		physical := filepath.Join(physicalBoundary, filepath.FromSlash(resolved.Path))
 		if !resolved.Info.IsDir() && root.fileAllowed != nil && !root.fileAllowed(physical) {
 			return nil
 		}
 		if resolved.Info.IsDir() {
-			if path_helpers.ShouldSkipV1SourceDir(filepath.Join(physicalSourcePath(boundary), filepath.FromSlash(physicalRoot.Path)), physical) {
+			if path_helpers.ShouldSkipV1SourceDir(physicalRootPath, physical) {
 				return fs.SkipDir
 			}
 			return nil
@@ -118,7 +120,20 @@ func (root SourceRoot) boundary() string {
 
 // OpenSourceFile opens a source at its logical location through its owning root.
 func (roots SourceRoots) OpenSourceFile(path string) (io.ReadCloser, error) {
+	return roots.SourceFileOpener()(path)
+}
+
+// SourceFileOpener returns OpenSourceFile with the roots' selection and
+// ownership resolved once, for repeated opens against an unchanged root set.
+func (roots SourceRoots) SourceFileOpener() func(string) (io.ReadCloser, error) {
 	allowed := roots.FileAllowed()
+	owns := roots.ownsSelectedPhysicalFunc()
+	return func(path string) (io.ReadCloser, error) {
+		return roots.openSourceFile(path, allowed, owns)
+	}
+}
+
+func (roots SourceRoots) openSourceFile(path string, allowed, owns func(string) bool) (io.ReadCloser, error) {
 	if allowed != nil && !allowed(path) {
 		return nil, &os.PathError{Op: "open", Path: path, Err: os.ErrNotExist}
 	}
@@ -133,7 +148,7 @@ func (roots SourceRoots) OpenSourceFile(path string) (io.ReadCloser, error) {
 		physicalPath := func(resolved sourceview.Resolution) string {
 			return filepath.Join(physicalSourcePath(root.boundary()), filepath.FromSlash(resolved.Path))
 		}
-		file, err := sourceview.OpenLocalSelected(context.Background(), root.boundary(), relative, func(resolved sourceview.Resolution) bool { return allowed == nil || allowed(physicalPath(resolved)) }, func(resolved sourceview.Resolution) bool { return roots.ownsSelectedPhysical(physicalPath(resolved)) })
+		file, err := sourceview.OpenLocalSelected(context.Background(), root.boundary(), relative, func(resolved sourceview.Resolution) bool { return allowed == nil || allowed(physicalPath(resolved)) }, func(resolved sourceview.Resolution) bool { return owns(physicalPath(resolved)) })
 		if err != nil {
 			return nil, fmt.Errorf("OpenLocal: %w", err)
 		}
@@ -294,25 +309,11 @@ func moduleFileSelection(directory string, filters []v1.ProtoFileFilter, include
 // FileModules maps import paths to their owning modules for managed selectors.
 // Callers check import collisions before using this mapping.
 func (roots SourceRoots) FileModules() (map[string]string, error) {
-	modules := make(map[string]string)
-	allowed := roots.FileAllowed()
-	for _, root := range roots {
-		err := root.walk(allowed, true, roots.ownsSelectedPhysical, func(path string) error {
-			if allowed != nil && !allowed(path) {
-				return nil
-			}
-			relative, err := filepath.Rel(root.Path, path)
-			if err != nil {
-				return err
-			}
-			modules[filepath.ToSlash(relative)] = root.Module
-			return nil
-		})
-		if err != nil {
-			return nil, err
-		}
+	index, err := IndexSources(roots)
+	if err != nil {
+		return nil, err
 	}
-	return modules, nil
+	return index.FileModules(roots)
 }
 
 // ModuleSources validates module roots and resolves them relative to its directory.
@@ -343,11 +344,21 @@ func ModuleSources(directory string, module v1.Module) (SourceRoots, error) {
 }
 
 func (roots SourceRoots) ownsSelectedPhysical(path string) bool {
+	return roots.ownsSelectedPhysicalFunc()(path)
+}
+
+// ownsSelectedPhysicalFunc resolves each root's physical path once for repeated checks.
+func (roots SourceRoots) ownsSelectedPhysicalFunc() func(string) bool {
+	physicalRoots := make([]string, 0)
 	for _, root := range roots {
-		physicalRoot := physicalSourcePath(root.Path)
-		if sourcePathWithin(path, physicalRoot) && root.allowsPath(path, physicalRoot) {
-			return true
-		}
+		physicalRoots = append(physicalRoots, physicalSourcePath(root.Path))
 	}
-	return false
+	return func(path string) bool {
+		for i, root := range roots {
+			if sourcePathWithin(path, physicalRoots[i]) && root.allowsPath(path, physicalRoots[i]) {
+				return true
+			}
+		}
+		return false
+	}
 }

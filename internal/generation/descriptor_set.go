@@ -58,6 +58,7 @@ func prepareDescriptorTargets(ctx context.Context, log logger.Logger, cache modu
 	prepared := make([]preparedDescriptorTarget, 0, len(targets))
 	seen := make(map[string]v1ModuleSelection)
 	requested := make(map[string]*sourceSelectorMatches)
+	locals := newV1LocalModules(request.WorkspaceRoot)
 	for _, target := range targets {
 		if target.config.Generate.HasSourceSelectors() {
 			requested[target.configPath] = newSourceSelectorMatches(target.config.Generate.Packages, target.config.Generate.Paths)
@@ -67,7 +68,7 @@ func prepareDescriptorTargets(ctx context.Context, log logger.Logger, cache modu
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		selected, err := resolveV1GenerationModule(ctx, cache, request.WorkspaceRoot, filepath.Dir(target.configPath), target.module, request.Frozen)
+		selected, err := resolveV1GenerationModule(ctx, cache, locals, filepath.Dir(target.configPath), target.module, request.Frozen)
 		if err != nil {
 			return nil, fmt.Errorf("resolveV1GenerationModule for %s: %w", target.configPath, err)
 		}
@@ -99,7 +100,7 @@ func prepareDescriptorTargets(ctx context.Context, log logger.Logger, cache modu
 			}
 		}
 		label := fmt.Sprintf("project %q, module %q (%s)", relativeDescriptorPath(request.WorkDir, filepath.Dir(target.configPath)), selected.module.Name, relativeDescriptorPath(request.WorkDir, selected.directory))
-		app, err := prepareV1ModuleCore(log, request, target.configPath, selected.directory, target.config, selected.module, selected.dependencies)
+		app, index, err := prepareV1ModuleCore(log, request, target.configPath, selected.directory, target.config, selected.module, selected.dependencies)
 		if err != nil {
 			return nil, fmt.Errorf("prepareV1ModuleCore for %s: %w", label, err)
 		}
@@ -121,7 +122,7 @@ func prepareDescriptorTargets(ctx context.Context, log logger.Logger, cache modu
 			return nil, fmt.Errorf("ModuleSources: %w", err)
 		}
 		roots = append(roots, selected.dependencies...)
-		owners, err := roots.FileModules()
+		owners, err := index.FileModules(roots)
 		if err != nil {
 			return nil, fmt.Errorf("FileModules: %w", err)
 		}
