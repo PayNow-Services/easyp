@@ -6,11 +6,13 @@ import (
 	"log/slog"
 	"maps"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/types/descriptorpb"
 
 	"github.com/easyp-tech/easyp/internal/core"
@@ -54,8 +56,56 @@ func generateV1DescriptorSet(ctx context.Context, log logger.Logger, cache modul
 	return nil
 }
 
+type descriptorTargetJob struct {
+	target   generationTarget
+	selected v1GenerationModule
+	files    []string
+	label    string
+}
+
+type preparedDescriptorSlot struct {
+	prepared preparedDescriptorTarget
+	err      error
+}
+
+// prepareDescriptorTargets resolves and selects targets in order, then
+// compiles their graphs concurrently. It reports the error a sequential pass
+// would reach first.
 func prepareDescriptorTargets(ctx context.Context, log logger.Logger, cache modules.Cache, request Request, targets []generationTarget) ([]preparedDescriptorTarget, error) {
-	prepared := make([]preparedDescriptorTarget, 0, len(targets))
+	jobs, selectErr := selectDescriptorTargets(ctx, cache, request, targets)
+
+	slots := make([]*preparedDescriptorSlot, 0)
+	for range jobs {
+		slots = append(slots, &preparedDescriptorSlot{})
+	}
+	var group errgroup.Group
+	group.SetLimit(runtime.GOMAXPROCS(0))
+	for index, job := range jobs {
+		slot := slots[index]
+		group.Go(func() error {
+			slot.prepared, slot.err = prepareDescriptorTarget(ctx, log, request, job)
+			return nil
+		})
+	}
+	_ = group.Wait()
+
+	prepared := make([]preparedDescriptorTarget, 0)
+	for _, slot := range slots {
+		if slot.err != nil {
+			return nil, slot.err
+		}
+		prepared = append(prepared, slot.prepared)
+	}
+	if selectErr != nil {
+		return nil, selectErr
+	}
+	return prepared, nil
+}
+
+// selectDescriptorTargets returns the jobs selected before any error, so the
+// caller can still report an earlier target's compilation failure first.
+func selectDescriptorTargets(ctx context.Context, cache modules.Cache, request Request, targets []generationTarget) ([]descriptorTargetJob, error) {
+	var jobs []descriptorTargetJob
 	seen := make(map[string]v1ModuleSelection)
 	requested := make(map[string]*sourceSelectorMatches)
 	locals := newV1LocalModules(request.WorkspaceRoot)
@@ -66,16 +116,16 @@ func prepareDescriptorTargets(ctx context.Context, log logger.Logger, cache modu
 	}
 	for _, target := range targets {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return jobs, err
 		}
 		selected, err := resolveV1GenerationModule(ctx, cache, locals, filepath.Dir(target.configPath), target.module, request.Frozen)
 		if err != nil {
-			return nil, fmt.Errorf("resolveV1GenerationModule for %s: %w", target.configPath, err)
+			return jobs, fmt.Errorf("resolveV1GenerationModule for %s: %w", target.configPath, err)
 		}
 		key := filepath.Clean(target.configPath) + "\x00" + filepath.Clean(selected.directory)
 		if previous, exists := seen[key]; exists {
 			if !sameSourceSelectors(previous.packages, target.module.packages) || !sameSourceSelectors(previous.paths, target.module.paths) {
-				return nil, fmt.Errorf("%s: generate.modules[%d] and generate.modules[%d] select module %q with conflicting filters", target.configPath, previous.index, target.module.index, selected.module.Name)
+				return jobs, fmt.Errorf("%s: generate.modules[%d] and generate.modules[%d] select module %q with conflicting filters", target.configPath, previous.index, target.module.index, selected.module.Name)
 			}
 			continue
 		}
@@ -90,52 +140,58 @@ func prepareDescriptorTargets(ctx context.Context, log logger.Logger, cache modu
 		if selectors, filtered := requested[target.configPath]; filtered {
 			files, err = selectedSourceFiles(ctx, selected, selectors, moduleSelectors)
 			if err != nil {
-				return nil, fmt.Errorf("selectedSourceFiles for %s: %w", target.configPath, err)
+				return jobs, fmt.Errorf("selectedSourceFiles for %s: %w", target.configPath, err)
 			}
 			if err := moduleSelectors.validateMatches(fmt.Sprintf("generate.modules[%d]", target.module.index)); err != nil {
-				return nil, fmt.Errorf("%s: %w", target.configPath, err)
+				return jobs, fmt.Errorf("%s: %w", target.configPath, err)
 			}
 			if len(files) == 0 {
 				continue
 			}
 		}
 		label := fmt.Sprintf("project %q, module %q (%s)", relativeDescriptorPath(request.WorkDir, filepath.Dir(target.configPath)), selected.module.Name, relativeDescriptorPath(request.WorkDir, selected.directory))
-		app, index, err := prepareV1ModuleCore(log, request, target.configPath, selected.directory, target.config, selected.module, selected.dependencies)
-		if err != nil {
-			return nil, fmt.Errorf("prepareV1ModuleCore for %s: %w", label, err)
-		}
-		var plan *core.GenerationPlan
-		if files != nil {
-			plan, err = app.PrepareGenerationFiles(ctx, selected.directory, files)
-		} else {
-			plan, err = app.PrepareGeneration(ctx, selected.directory)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("PrepareGeneration for %s: %w", label, err)
-		}
-		full := plan.DescriptorSet(true)
-		if _, err := protodesc.NewFiles(full); err != nil {
-			return nil, fmt.Errorf("validate descriptor set for %s: %w", label, err)
-		}
-		roots, err := modules.ModuleSources(selected.directory, selected.module)
-		if err != nil {
-			return nil, fmt.Errorf("ModuleSources: %w", err)
-		}
-		roots = append(roots, selected.dependencies...)
-		owners, err := index.FileModules(roots)
-		if err != nil {
-			return nil, fmt.Errorf("FileModules: %w", err)
-		}
-		versions := descriptorVersions(request, selected)
-		prepared = append(prepared, preparedDescriptorTarget{target: target, selected: selected, plan: plan, full: full, owners: owners, versions: versions, label: label})
+		jobs = append(jobs, descriptorTargetJob{target: target, selected: selected, files: files, label: label})
 	}
 	for _, path := range slices.Sorted(maps.Keys(requested)) {
 		selectors := requested[path]
 		if err := selectors.validateMatches("generate"); err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
+			return jobs, fmt.Errorf("%s: %w", path, err)
 		}
 	}
-	return prepared, nil
+	return jobs, nil
+}
+
+func prepareDescriptorTarget(ctx context.Context, log logger.Logger, request Request, job descriptorTargetJob) (preparedDescriptorTarget, error) {
+	target, selected, files, label := job.target, job.selected, job.files, job.label
+	app, index, err := prepareV1ModuleCore(log, request, target.configPath, selected.directory, target.config, selected.module, selected.dependencies)
+	if err != nil {
+		return preparedDescriptorTarget{}, fmt.Errorf("prepareV1ModuleCore for %s: %w", label, err)
+	}
+	var plan *core.GenerationPlan
+	if files != nil {
+		plan, err = app.PrepareGenerationFiles(ctx, selected.directory, files)
+	} else {
+		plan, err = app.PrepareGeneration(ctx, selected.directory)
+	}
+	if err != nil {
+		return preparedDescriptorTarget{}, fmt.Errorf("PrepareGeneration for %s: %w", label, err)
+	}
+	full := plan.DescriptorSet(true)
+	_, err = protodesc.NewFiles(full)
+	if err != nil {
+		return preparedDescriptorTarget{}, fmt.Errorf("validate descriptor set for %s: %w", label, err)
+	}
+	roots, err := modules.ModuleSources(selected.directory, selected.module)
+	if err != nil {
+		return preparedDescriptorTarget{}, fmt.Errorf("ModuleSources: %w", err)
+	}
+	roots = append(roots, selected.dependencies...)
+	owners, err := index.FileModules(roots)
+	if err != nil {
+		return preparedDescriptorTarget{}, fmt.Errorf("FileModules: %w", err)
+	}
+	versions := descriptorVersions(request, selected)
+	return preparedDescriptorTarget{target: target, selected: selected, plan: plan, full: full, owners: owners, versions: versions, label: label}, nil
 }
 
 func sameSourceSelectors(first, second []string) bool {
