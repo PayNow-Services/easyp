@@ -117,6 +117,42 @@ func (v *View) resolveComponents(ctx context.Context, base string, components []
 	if !info.IsDir() {
 		return ErrChanged
 	}
+	return v.resolveFrom(ctx, base, info, components, active, resolved)
+}
+
+// resolveChild resolves logical, a direct child of an already resolved
+// directory, by continuing from the parent's resolution. It returns what
+// Resolve would for logical without re-inspecting the parent's components.
+// A plain file or directory entry reuses the metadata of its directory read.
+func (v *View) resolveChild(ctx context.Context, logical string, parent Resolution, name string, entry fs.DirEntry) (Resolution, error) {
+	resolved := Resolution{Path: parent.Path, Info: parent.Info, Links: slices.Clone(parent.Links)}
+	err := validatePointer(logical)
+	if err != nil {
+		return resolved, &fs.PathError{Op: "Resolve", Path: logical, Err: err}
+	}
+	if entry.Type() == 0 || entry.Type() == fs.ModeDir {
+		info, infoErr := entry.Info()
+		if infoErr == nil && info.Mode().Type() == entry.Type() {
+			resolved.Path, resolved.Info = joinName(parent.Path, name), info
+			err = ctx.Err()
+			if err != nil {
+				return resolved, &fs.PathError{Op: "Resolve", Path: logical, Err: err}
+			}
+			return resolved, nil
+		}
+	}
+	err = v.resolveFrom(ctx, parent.Path, parent.Info, []string{name}, make(map[string]bool), &resolved)
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		return resolved, &fs.PathError{Op: "Resolve", Path: logical, Err: err}
+	}
+	return resolved, nil
+}
+
+func (v *View) resolveFrom(ctx context.Context, base string, info fs.FileInfo, components []string, active map[string]bool, resolved *Resolution) error {
+	var err error
 	current := base
 	for _, component := range components {
 		err = ctx.Err()
@@ -274,19 +310,25 @@ func (v *View) WalkSelected(ctx context.Context, logicalRoot string, selectEntry
 	if fn == nil {
 		return &fs.PathError{Op: "Walk", Path: logicalRoot, Err: fs.ErrInvalid}
 	}
-	err := v.walk(ctx, logicalRoot, selectEntry, fn, make(map[string]bool))
+	err := v.walk(ctx, logicalRoot, nil, selectEntry, fn, make(map[string]bool))
 	if errors.Is(err, fs.SkipDir) || errors.Is(err, fs.SkipAll) {
 		return nil
 	}
 	return err
 }
 
-func (v *View) walk(ctx context.Context, logical string, selectEntry func(string, fs.DirEntry) bool, fn WalkFunc, active map[string]bool) error {
+func (v *View) walk(ctx context.Context, logical string, parent *walkParent, selectEntry func(string, fs.DirEntry) bool, fn WalkFunc, active map[string]bool) error {
 	err := ctx.Err()
 	if err != nil {
 		return &fs.PathError{Op: "Walk", Path: logical, Err: err}
 	}
-	resolved, resolveErr := v.Resolve(ctx, logical)
+	var resolved Resolution
+	var resolveErr error
+	if parent == nil {
+		resolved, resolveErr = v.Resolve(ctx, logical)
+	} else {
+		resolved, resolveErr = v.resolveChild(ctx, logical, parent.resolved, parent.name, parent.entry)
+	}
 	err = ctx.Err()
 	if err != nil {
 		return &fs.PathError{Op: "Walk", Path: logical, Err: err}
@@ -335,7 +377,7 @@ func (v *View) walk(ctx context.Context, logical string, selectEntry func(string
 			if selectEntry != nil && !selectEntry(child, entry) {
 				continue
 			}
-			err = v.walk(ctx, child, selectEntry, fn, active)
+			err = v.walk(ctx, child, &walkParent{resolved: resolved, name: name, entry: entry}, selectEntry, fn, active)
 		}
 		if errors.Is(err, fs.SkipDir) {
 			return nil
@@ -345,6 +387,12 @@ func (v *View) walk(ctx context.Context, logical string, selectEntry func(string
 		}
 	}
 	return nil
+}
+
+type walkParent struct {
+	resolved Resolution
+	name     string
+	entry    fs.DirEntry
 }
 
 func joinName(parent, name string) string {

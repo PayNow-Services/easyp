@@ -128,16 +128,18 @@ func (roots SourceRoots) OpenSourceFile(path string) (io.ReadCloser, error) {
 func (roots SourceRoots) SourceFileOpener() func(string) (io.ReadCloser, error) {
 	allowed := roots.FileAllowed()
 	owns := roots.ownsSelectedPhysicalFunc()
+	opener := sourceview.NewLocalOpener()
+	physical := newPhysicalPaths()
 	return func(path string) (io.ReadCloser, error) {
-		return roots.openSourceFile(path, allowed, owns)
+		return roots.openSourceFile(path, allowed, owns, opener, physical)
 	}
 }
 
-func (roots SourceRoots) openSourceFile(path string, allowed, owns func(string) bool) (io.ReadCloser, error) {
+func (r SourceRoots) openSourceFile(path string, allowed, owns func(string) bool, opener *sourceview.LocalOpener, physical *physicalPaths) (io.ReadCloser, error) {
 	if allowed != nil && !allowed(path) {
 		return nil, &os.PathError{Op: "open", Path: path, Err: os.ErrNotExist}
 	}
-	for _, root := range roots {
+	for _, root := range r {
 		if !sourcePathWithin(path, root.Path) {
 			continue
 		}
@@ -146,9 +148,9 @@ func (roots SourceRoots) openSourceFile(path string, allowed, owns func(string) 
 			return nil, fmt.Errorf("Rel: %w", err)
 		}
 		physicalPath := func(resolved sourceview.Resolution) string {
-			return filepath.Join(physicalSourcePath(root.boundary()), filepath.FromSlash(resolved.Path))
+			return filepath.Join(physical.boundary(root.boundary()), filepath.FromSlash(resolved.Path))
 		}
-		file, err := sourceview.OpenLocalSelected(context.Background(), root.boundary(), relative, func(resolved sourceview.Resolution) bool { return allowed == nil || allowed(physicalPath(resolved)) }, func(resolved sourceview.Resolution) bool { return owns(physicalPath(resolved)) })
+		file, err := opener.OpenSelected(context.Background(), root.boundary(), relative, func(resolved sourceview.Resolution) bool { return allowed == nil || allowed(physicalPath(resolved)) }, func(resolved sourceview.Resolution) bool { return owns(physicalPath(resolved)) })
 		if err != nil {
 			return nil, fmt.Errorf("OpenLocal: %w", err)
 		}
@@ -177,13 +179,17 @@ func (root SourceRoot) allows(path, importRoot string) bool {
 }
 
 func (root SourceRoot) allowsPath(path, importRoot string) bool {
-	if root.fileAllowed != nil && !root.fileAllowed(path) {
+	return root.allowsPathWith(path, importRoot, path_helpers.ShouldSkipV1SourceDir)
+}
+
+func (r SourceRoot) allowsPathWith(path, importRoot string, shouldSkip func(root, path string) bool) bool {
+	if r.fileAllowed != nil && !r.fileAllowed(path) {
 		return false
 	}
 	// A containing consumer root does not own files inside a nested module.
 	// Import lookup must use the same boundaries as source discovery.
 	for directory := filepath.Dir(path); sourcePathWithin(directory, importRoot) && filepath.Clean(directory) != filepath.Clean(importRoot); directory = filepath.Dir(directory) {
-		if path_helpers.ShouldSkipV1SourceDir(importRoot, directory) {
+		if shouldSkip(importRoot, directory) {
 			return false
 		}
 	}
@@ -200,6 +206,7 @@ func (roots SourceRoots) FileAllowed() func(string) bool {
 		path string
 		root SourceRoot
 	}
+	physical := newPhysicalPaths()
 	selections := make([]selection, 0, len(roots))
 	for _, root := range roots {
 		selections = append(selections, selection{path: filepath.Clean(root.Path), root: root})
@@ -215,14 +222,14 @@ func (roots SourceRoots) FileAllowed() func(string) bool {
 				continue
 			}
 			inside = true
-			if root.root.allowsPath(path, root.path) {
+			if root.root.allowsPathWith(path, root.path, physical.shouldSkip) {
 				return true
 			}
 		}
 		return !inside
 	}
 	return func(path string) bool {
-		return allowedPath(filepath.Clean(path)) && allowedPath(physicalSourcePath(path))
+		return allowedPath(filepath.Clean(path)) && allowedPath(physical.resolve(path))
 	}
 }
 

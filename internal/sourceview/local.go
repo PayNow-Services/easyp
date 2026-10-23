@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // ErrNestedRepository marks an alias crossing into a nested local repository.
@@ -24,7 +25,48 @@ func OpenLocal(ctx context.Context, rootPath, logical string) (fs.File, error) {
 // An optional nestedAllowed predicate must prove explicit source ownership for
 // a target crossing a nested repository boundary.
 func OpenLocalSelected(ctx context.Context, rootPath, logical string, selected func(Resolution) bool, nestedAllowed ...func(Resolution) bool) (fs.File, error) {
-	root, view, err := localView(rootPath)
+	return openLocalSelected(ctx, filepath.EvalSymlinks, rootPath, logical, selected, nestedAllowed...)
+}
+
+// LocalOpener opens sources like OpenLocalSelected and resolves each root's
+// canonical spelling once. Every open still verifies that the opened root is
+// the requested path, so a root replaced after its first use fails with
+// ErrChanged. A LocalOpener is safe for concurrent use.
+type LocalOpener struct {
+	mu        sync.Mutex
+	canonical map[string]string
+}
+
+// NewLocalOpener returns an opener with no resolved roots.
+func NewLocalOpener() *LocalOpener {
+	return &LocalOpener{canonical: make(map[string]string)}
+}
+
+// OpenSelected behaves as OpenLocalSelected.
+func (r *LocalOpener) OpenSelected(ctx context.Context, rootPath, logical string, selected func(Resolution) bool, nestedAllowed ...func(Resolution) bool) (fs.File, error) {
+	return openLocalSelected(ctx, r.canonicalRoot, rootPath, logical, selected, nestedAllowed...)
+}
+
+func (r *LocalOpener) canonicalRoot(rootPath string) (string, error) {
+	r.mu.Lock()
+	canonical, ok := r.canonical[rootPath]
+	r.mu.Unlock()
+	if ok {
+		return canonical, nil
+	}
+
+	canonical, err := filepath.EvalSymlinks(rootPath)
+	if err != nil {
+		return "", err
+	}
+	r.mu.Lock()
+	r.canonical[rootPath] = canonical
+	r.mu.Unlock()
+	return canonical, nil
+}
+
+func openLocalSelected(ctx context.Context, canonicalRoot func(string) (string, error), rootPath, logical string, selected func(Resolution) bool, nestedAllowed ...func(Resolution) bool) (fs.File, error) {
+	root, view, err := localViewWith(rootPath, canonicalRoot)
 	if err != nil {
 		return nil, fmt.Errorf("localView: %w", err)
 	}
@@ -119,7 +161,11 @@ func ResolveLocal(ctx context.Context, rootPath, logical string) (_ Resolution, 
 }
 
 func localView(rootPath string) (*os.Root, *View, error) {
-	canonical, err := filepath.EvalSymlinks(rootPath)
+	return localViewWith(rootPath, filepath.EvalSymlinks)
+}
+
+func localViewWith(rootPath string, canonicalRoot func(string) (string, error)) (*os.Root, *View, error) {
+	canonical, err := canonicalRoot(rootPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("EvalSymlinks: %w", err)
 	}
