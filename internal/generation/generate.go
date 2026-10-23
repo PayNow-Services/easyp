@@ -149,7 +149,7 @@ func Run(ctx context.Context, log logger.Logger, cache modules.Cache, request Re
 		if err != nil {
 			return fmt.Errorf("prepareDescriptorTargets: %w", err)
 		}
-		return executePreparedTargets(ctx, prepared)
+		return executePreparedTargets(ctx, log, prepared)
 	}
 	if err := generateV1DescriptorSet(ctx, log, cache, request, descriptorTargets); err != nil {
 		return fmt.Errorf("generateV1DescriptorSet: %w", err)

@@ -74,7 +74,7 @@ func (c *Core) PrepareGenerationFiles(ctx context.Context, root string, files []
 }
 
 func (c *Core) prepareGeneration(ctx context.Context, root string, selected []string) (*GenerationPlan, error) {
-	c.logger.Info(ctx, "preparing code generation", slog.String("root", root))
+	c.logger.Debug(ctx, "preparing code generation", slog.String("root", root))
 	c.sourceBoundary = root
 	imports := append([]string{}, c.importRoots...)
 	var files []string
@@ -351,7 +351,7 @@ func (p *GenerationPlan) StageRuns(ctx context.Context, runs []*PluginRun, files
 		}
 	}
 
-	c.logger.Info(ctx, "code generation completed")
+	c.logger.Debug(ctx, "code generation completed")
 
 	return nil
 }

@@ -47,6 +47,13 @@ func (b *GenerateBucket) PutFile(_ context.Context, path string, data []byte) {
 	b.filesToWrite[path] = newImmutableData(data)
 }
 
+// FileCount reports how many files are staged for writing.
+func (b *GenerateBucket) FileCount() int {
+	b.lock.RLock()
+	defer b.lock.RUnlock()
+	return len(b.filesToWrite)
+}
+
 func (b *GenerateBucket) GetFile(_ context.Context, path string) (*ImmutableData, bool) {
 	b.lock.RLock()
 	defer b.lock.RUnlock()

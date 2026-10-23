@@ -41,7 +41,7 @@ func generateV1DescriptorSet(ctx context.Context, log logger.Logger, cache modul
 	if err != nil {
 		return fmt.Errorf("planDescriptorOutputs: %w", err)
 	}
-	if err := executePreparedTargets(ctx, prepared); err != nil {
+	if err := executePreparedTargets(ctx, log, prepared); err != nil {
 		return err
 	}
 	for _, output := range outputs {
@@ -72,7 +72,11 @@ type preparedDescriptorSlot struct {
 // compiles their graphs concurrently. It reports the error a sequential pass
 // would reach first.
 func prepareDescriptorTargets(ctx context.Context, log logger.Logger, cache modules.Cache, request Request, targets []generationTarget) ([]preparedDescriptorTarget, error) {
+	log.Info(ctx, "resolving modules", slog.Int("modules", len(targets)))
 	jobs, selectErr := selectDescriptorTargets(ctx, cache, request, targets)
+	if selectErr == nil {
+		log.Info(ctx, "compiling protos", slog.Int("modules", len(jobs)))
+	}
 
 	slots := make([]*preparedDescriptorSlot, 0)
 	for range jobs {
@@ -259,11 +263,15 @@ func relativeDescriptorPath(root, path string) string {
 
 // executePreparedTargets runs every target's plugins concurrently, then stages
 // their outputs in target and plugin order so conflicts resolve as if run in sequence.
-func executePreparedTargets(ctx context.Context, prepared []preparedDescriptorTarget) error {
+func executePreparedTargets(ctx context.Context, log logger.Logger, prepared []preparedDescriptorTarget) error {
 	runs := make([][]*core.PluginRun, 0)
+	count := 0
 	for _, target := range prepared {
-		runs = append(runs, target.plan.PluginRuns())
+		targetRuns := target.plan.PluginRuns()
+		runs = append(runs, targetRuns)
+		count += len(targetRuns)
 	}
+	log.Info(ctx, "running plugins", slog.Int("runs", count))
 	var group errgroup.Group
 	group.SetLimit(runtime.GOMAXPROCS(0))
 	for _, targetRuns := range runs {
@@ -287,8 +295,12 @@ func executePreparedTargets(ctx context.Context, prepared []preparedDescriptorTa
 			return fmt.Errorf("ExecuteInto for %s: %w", target.label, err)
 		}
 	}
-	if err := bucket.DumpToFs(ctx); err != nil {
+	files := bucket.FileCount()
+	log.Info(ctx, "writing files", slog.Int("files", files))
+	err := bucket.DumpToFs(ctx)
+	if err != nil {
 		return fmt.Errorf("DumpToFs: %w", err)
 	}
+	log.Info(ctx, "code generation completed", slog.Int("files", files))
 	return nil
 }
