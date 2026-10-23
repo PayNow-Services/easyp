@@ -206,9 +206,35 @@ func (p *GenerationPlan) Execute(ctx context.Context) error {
 
 // ExecuteInto stages plugin results in a shared bucket, rejecting conflicting outputs.
 func (p *GenerationPlan) ExecuteInto(ctx context.Context, filesToWrite *GenerateBucket) error {
-	c, root := p.core, p.root
+	runs := p.PluginRuns()
+	for _, run := range runs {
+		run.Execute(ctx)
+		if run.err != nil {
+			break
+		}
+	}
+	return p.StageRuns(ctx, runs, filesToWrite)
+}
+
+// PluginRun is one plugin invocation of a prepared plan. Runs of any plans may
+// execute concurrently; StageRuns then stages their results in plugin order.
+type PluginRun struct {
+	plugin          Plugin
+	source          string
+	filesToGenerate []string
+	executor        pluginexecutor.Executor
+	info            pluginexecutor.Info
+	request         *pluginpb.CodeGeneratorRequest
+	response        *pluginpb.CodeGeneratorResponse
+	err             error
+}
+
+// PluginRuns returns one unexecuted run per configured plugin, in plugin order.
+func (p *GenerationPlan) PluginRuns() []*PluginRun {
+	c := p.core
 	files, fileDescriptors, dependencyFiles := p.files, p.descriptors, p.dependencyFiles
 
+	runs := make([]*PluginRun, 0)
 	for _, plugin := range c.plugins {
 		filesToGenerate := slices.Clone(files)
 
@@ -240,15 +266,40 @@ func (p *GenerationPlan) ExecuteInto(ctx context.Context, filesToWrite *Generate
 			source = plugin.Source.Path
 		}
 
-		resp, err := executor.Execute(ctx, pluginexecutor.Info{
-			Source:  source,
-			WorkDir: c.pluginWorkDir,
-			Command: plugin.Source.Command,
-			Options: plugin.Options,
-		}, req)
-		if err != nil {
-			return fmt.Errorf("execute plugin %s: %w, executor: %s", source, err, executor.GetName())
+		runs = append(runs, &PluginRun{
+			plugin:          plugin,
+			source:          source,
+			filesToGenerate: filesToGenerate,
+			executor:        executor,
+			info: pluginexecutor.Info{
+				Source:  source,
+				WorkDir: c.pluginWorkDir,
+				Command: plugin.Source.Command,
+				Options: plugin.Options,
+			},
+			request: req,
+		})
+	}
+	return runs
+}
+
+// Execute invokes the plugin and records its response or error for StageRuns.
+func (r *PluginRun) Execute(ctx context.Context) {
+	r.response, r.err = r.executor.Execute(ctx, r.info, r.request)
+}
+
+// StageRuns stages executed runs of this plan in order, rejecting conflicting outputs.
+func (p *GenerationPlan) StageRuns(ctx context.Context, runs []*PluginRun, filesToWrite *GenerateBucket) error {
+	c, root := p.core, p.root
+	fileDescriptors := p.descriptors
+
+	for _, run := range runs {
+		plugin, source, executor, filesToGenerate := run.plugin, run.source, run.executor, run.filesToGenerate
+		if run.err != nil {
+			return fmt.Errorf("execute plugin %s: %w, executor: %s", source, run.err, executor.GetName())
 		}
+		resp := run.response
+		var err error
 
 		if resp.Error != nil {
 			return fmt.Errorf("plugin %s error: %s, executor: %s", plugin.Source, *resp.Error, executor.GetName())

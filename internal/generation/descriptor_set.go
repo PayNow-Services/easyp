@@ -257,13 +257,33 @@ func relativeDescriptorPath(root, path string) string {
 	return filepath.ToSlash(relative)
 }
 
+// executePreparedTargets runs every target's plugins concurrently, then stages
+// their outputs in target and plugin order so conflicts resolve as if run in sequence.
 func executePreparedTargets(ctx context.Context, prepared []preparedDescriptorTarget) error {
-	bucket := core.NewGenerateBucket()
+	runs := make([][]*core.PluginRun, 0)
 	for _, target := range prepared {
-		if err := ctx.Err(); err != nil {
+		runs = append(runs, target.plan.PluginRuns())
+	}
+	var group errgroup.Group
+	group.SetLimit(runtime.GOMAXPROCS(0))
+	for _, targetRuns := range runs {
+		for _, run := range targetRuns {
+			group.Go(func() error {
+				run.Execute(ctx)
+				return nil
+			})
+		}
+	}
+	_ = group.Wait()
+
+	bucket := core.NewGenerateBucket()
+	for index, target := range prepared {
+		err := ctx.Err()
+		if err != nil {
 			return err
 		}
-		if err := target.plan.ExecuteInto(ctx, bucket); err != nil {
+		err = target.plan.StageRuns(ctx, runs[index], bucket)
+		if err != nil {
 			return fmt.Errorf("ExecuteInto for %s: %w", target.label, err)
 		}
 	}
