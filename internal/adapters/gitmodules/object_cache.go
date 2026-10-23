@@ -51,7 +51,7 @@ func checkoutCachedCommit(ctx context.Context, checkout string, entry v1.LockedM
 		// requesting its object ID. Do not silently replace an unavailable pin by HEAD.
 		_, fetchErr := gitV1(ctx, repository, "-c", "fetch.fsckObjects=true", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--depth=1", "--", candidate.remote, commit)
 		if fetchErr != nil {
-			if gitcommand.Interrupted(fetchErr) {
+			if gitcommand.Interrupted(fetchErr) || repositoryNotFound(fetchErr) {
 				return false, fmt.Errorf("gitV1: %w", fetchErr)
 			}
 			// Some servers only expose advertised refs. Fetch reachable history as a

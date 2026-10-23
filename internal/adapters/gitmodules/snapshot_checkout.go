@@ -107,6 +107,7 @@ func checkoutV1ModuleWithRoots(ctx context.Context, source, version, cacheRoot s
 		if err != nil {
 			return v1ModuleCheckout{}, fmt.Errorf("v1GitModuleCandidates: %w", err)
 		}
+		candidates = preferRememberedCandidate(cacheRoot, source, candidates)
 	}
 	var firstErr, moduleErr error
 	for _, candidate := range candidates {
@@ -120,6 +121,9 @@ func checkoutV1ModuleWithRoots(ctx context.Context, source, version, cacheRoot s
 		candidateContext := gitcommand.WithAttributes(ctx, slog.String("repository", candidate.remote), slog.String("module_directory", candidate.subdir))
 		checkout, cloned, candidateErr := checkoutSnapshotCandidate(candidateContext, dir, source, version, candidate, roots, inspect)
 		if candidateErr == nil {
+			if v1.IsCommitRef(version) {
+				rememberCandidate(cacheRoot, source, candidate)
+			}
 			return checkout, nil
 		}
 		removeErr := os.RemoveAll(dir)

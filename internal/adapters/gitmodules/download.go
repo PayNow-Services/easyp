@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/easyp-tech/easyp/internal/adapters/gitcommand"
 	moduleconfig "github.com/easyp-tech/easyp/internal/adapters/module_config"
 	v1 "github.com/easyp-tech/easyp/internal/config/v1"
@@ -43,19 +45,43 @@ func (c *Cache) install(ctx context.Context, lock v1.Lock, acquire bool) error {
 	if err := lock.Validate(); err != nil {
 		return fmt.Errorf("Validate: %w", err)
 	}
+	errs := make([]*error, 0)
+	var group errgroup.Group
+	group.SetLimit(installConcurrency)
 	for _, entry := range lock.Modules {
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("Err: %w", err)
-		}
-		key := v1ModuleCachePath(c.root, entry) + "\x00" + entry.Version
-		if c.installed.contains(key) {
-			continue
-		}
-		if err := c.installEntry(ctx, entry, acquire); err != nil {
-			return err
-		}
-		c.installed.add(key)
+		var entryErr error
+		errs = append(errs, &entryErr)
+		group.Go(func() error {
+			entryErr = c.installOnce(ctx, entry, acquire)
+			return nil
+		})
 	}
+	_ = group.Wait()
+	for _, err := range errs {
+		if *err != nil {
+			return *err
+		}
+	}
+	return nil
+}
+
+// installConcurrency bounds parallel module installs, which are mostly network fetches.
+const installConcurrency = 8
+
+func (c *Cache) installOnce(ctx context.Context, entry v1.LockedModule, acquire bool) error {
+	err := ctx.Err()
+	if err != nil {
+		return fmt.Errorf("Err: %w", err)
+	}
+	key := v1ModuleCachePath(c.root, entry) + "\x00" + entry.Version
+	if c.installed.contains(key) {
+		return nil
+	}
+	err = c.installEntry(ctx, entry, acquire)
+	if err != nil {
+		return err
+	}
+	c.installed.add(key)
 	return nil
 }
 
