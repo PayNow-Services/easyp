@@ -21,6 +21,7 @@ type Cache struct {
 	bsrResolver modules.BSRResolver
 	logger      logger.Logger
 	proxy       string
+	installed   *installedModules
 }
 
 // WithLogger returns an isolated cache handle with dependency progress logging.
@@ -28,6 +29,15 @@ type Cache struct {
 func (c *Cache) WithLogger(log logger.Logger) *Cache {
 	scoped := *c
 	scoped.logger = log
+	return &scoped
+}
+
+// WithInstallMemo returns a cache handle that skips entries already installed
+// and verified through it or its copies. It suits one command that installs
+// the same locked modules for many targets, not flows that re-verify on purpose.
+func (c *Cache) WithInstallMemo() *Cache {
+	scoped := *c
+	scoped.installed = &installedModules{entries: make(map[string]bool)}
 	return &scoped
 }
 

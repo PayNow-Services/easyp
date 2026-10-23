@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/easyp-tech/easyp/internal/adapters/gitcommand"
 	moduleconfig "github.com/easyp-tech/easyp/internal/adapters/module_config"
@@ -45,11 +46,41 @@ func (c *Cache) install(ctx context.Context, lock v1.Lock, acquire bool) error {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("Err: %w", err)
 		}
+		key := v1ModuleCachePath(c.root, entry) + "\x00" + entry.Version
+		if c.installed.contains(key) {
+			continue
+		}
 		if err := c.installEntry(ctx, entry, acquire); err != nil {
 			return err
 		}
+		c.installed.add(key)
 	}
 	return nil
+}
+
+// installedModules records entries installed and verified by one cache
+// handle. A nil set records nothing.
+type installedModules struct {
+	mu      sync.Mutex
+	entries map[string]bool
+}
+
+func (m *installedModules) contains(key string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.entries[key]
+}
+
+func (m *installedModules) add(key string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.entries[key] = true
 }
 
 func (c *Cache) installEntry(ctx context.Context, entry v1.LockedModule, acquire bool) (err error) {

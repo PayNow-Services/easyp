@@ -70,7 +70,7 @@ func (g Generate) Action(ctx *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("moduleCache: %w", err)
 	}
-	return generation.Run(ctx.Context, getLogger(ctx), cache, generation.Request{
+	return generation.Run(ctx.Context, getLogger(ctx), cache.WithInstallMemo(), generation.Request{
 		Frozen: flags.IsFrozen(ctx), WorkDir: root, GenConfig: genConfig,
 		Projects: ctx.StringSlice(flagGenerateProject), AllProjects: ctx.Bool(flagGenerateAll), WorkspaceRoot: ctx.String(flagGenerateWorkspace),
 		DescriptorSetOut:    ctx.String(flagGenerateDescriptorSetOut),
